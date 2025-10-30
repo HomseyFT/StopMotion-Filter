@@ -21,7 +21,10 @@ Make smooth 2D motion look like handmade stop motion. This repo extracts lower-b
 
 | Before | After |
 |---|---|
-| <video src="docs/media/test1.mp4" width="420" controls></video> | <video src="docs/media/video_choppy.mp4" width="420" controls></video> |
+| ![](docs/media/before_test1.gif) | ![](docs/media/after_test1.gif) |
+
+[Download before (MP4)](docs/media/before_test1.mp4) ·
+[Download after (MP4)](docs/media/after_test1.mp4)
 
 
 ## How it works
