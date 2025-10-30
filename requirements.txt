@@ -1,0 +1,9 @@
+# Core runtime libs
+opencv-python>=4.8,<5
+mediapipe>=0.10,<0.11
+numpy>=1.24,<3
+pandas>=2.0,<3
+
+# (Optional) Nice-to-haves for plotting/debugging:
+# matplotlib>=3.7,<4
+

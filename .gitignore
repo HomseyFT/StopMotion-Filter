@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+.env
+*.log
+
+# Outputs and local inputs
+out/
+clips/raw/
+clips/cropped/
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.code-workspace
+# Test/build caches (if you add tests later)
+.coverage
+htmlcov/
+.pytest_cache/
+dist/
+build/
+*.egg-info/
+
+
