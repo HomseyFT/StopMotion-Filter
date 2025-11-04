@@ -51,8 +51,9 @@ def fit_params(t, theta, min_K=3, max_K=24, smooth_win=5):
 def apply_filter(t, theta, K, sigma_t, sigma_deg, smooth_win=5, rng=None):
     """
     Apply step-hold filter with small jitter/noise, then enforce that
-    motion does not flip direction relative to the smooth baseline
-    within a swing (to avoid glitchy back-and-forth snaps).
+    motion stays mostly one-way within each swing segment, based on the
+    smooth baseline. This removes "glitchy" back-and-forth snaps while
+    keeping the chunky stop-motion feel.
     """
     t = np.asarray(t, float)
     theta = unwrap_deg(theta)
@@ -71,12 +72,12 @@ def apply_filter(t, theta, K, sigma_t, sigma_deg, smooth_win=5, rng=None):
     # Binning in normalized time
     bins = np.linspace(0.0, 1.0, K + 1)
 
-    # Optional timing jitter (kept, but small values are recommended)
+    # Optional timing jitter
     if sigma_t > 0 and T > 0:
         u_j = np.clip(
             u + rng.normal(0.0, sigma_t / T, size=u.shape),
             0.0,
-            1.0 - 1e-9
+            1.0 - 1e-9,
         )
     else:
         u_j = u
@@ -99,31 +100,65 @@ def apply_filter(t, theta, K, sigma_t, sigma_deg, smooth_win=5, rng=None):
 
     theta_chop = base + resid_hat + noise
 
-    # --- Direction-consistency pass to remove "glitchy" backward snaps ---
+    # -------- Segment-based direction consistency filter --------
 
-    # Gradient of baseline tells us main direction of motion
-    base_grad = np.gradient(base, t)
-
-    # Copy so we can adjust in-place
     theta_smooth = theta_chop.copy()
 
-    # Thresholds
-    grad_tol = 1e-3   # treat smaller gradients as "turning point"
-    step_tol = 1.0    # deg; small opposite moves below this are allowed
+    # Gradient of baseline: deg/s
+    base_grad = np.gradient(base, t)
 
-    for i in range(1, len(theta_smooth)):
-        dir_base = np.sign(base_grad[i])
+    # Raw sign of gradient
+    dir_raw = np.sign(base_grad)
 
-        # Near an extremum (grad ~ 0), allow direction changes
-        if abs(dir_base) < grad_tol:
+    # Treat small gradients as "flat" (no direction)
+    grad_tol = 1.0  # deg/s; tweak if needed
+    dir_raw[np.abs(base_grad) < grad_tol] = 0
+
+    # Forward-fill direction across short flat regions
+    dir_seg = dir_raw.copy()
+    last = 0
+    for i in range(len(dir_seg)):
+        if dir_seg[i] == 0:
+            dir_seg[i] = last
+        else:
+            last = dir_seg[i]
+
+    # Now dir_seg is roughly +1 in forward swings, -1 in backward swings, 0 where undefined
+
+    n = len(theta_smooth)
+    step_tol = 1.0  # deg; max allowed backward step within a segment
+
+    start = 0
+    while start < n:
+        d = dir_seg[start]
+        # extend segment while direction stays the same
+        end = start + 1
+        while end < n and dir_seg[end] == d:
+            end += 1
+
+        if d == 0 or end - start <= 1:
+            # no clear direction in this segment; skip
+            start = end
             continue
 
-        step = theta_smooth[i] - theta_smooth[i - 1]
+        # Enforce mostly monotone motion within [start, end)
+        prev = theta_smooth[start]
+        for i in range(start + 1, end):
+            step = theta_smooth[i] - prev
+            if d > 0:
+                # baseline says "increasing": forbid large decreases
+                if step < -step_tol:
+                    theta_smooth[i] = prev
+                else:
+                    prev = theta_smooth[i]
+            elif d < 0:
+                # baseline says "decreasing": forbid large increases
+                if step > step_tol:
+                    theta_smooth[i] = prev
+                else:
+                    prev = theta_smooth[i]
 
-        # If step goes opposite the baseline direction and is big enough,
-        # replace it with a hold (no backward snap).
-        if step * dir_base < 0 and abs(step) > step_tol:
-            theta_smooth[i] = theta_smooth[i - 1]
+        start = end
 
     return theta_smooth
 
