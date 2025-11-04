@@ -49,24 +49,83 @@ def fit_params(t, theta, min_K=3, max_K=24, smooth_win=5):
     return dict(K=int(K), sigma_t=float(sigma_t), sigma_deg=float(sigma_deg), smooth_win=int(smooth_win))
 
 def apply_filter(t, theta, K, sigma_t, sigma_deg, smooth_win=5, rng=None):
-    t = np.asarray(t, float); theta = unwrap_deg(theta)
-    t0, t1 = t[0], t[-1]; T = max(1e-9, t1-t0); u = (t-t0)/T
+    """
+    Apply step-hold filter with small jitter/noise, then enforce that
+    motion does not flip direction relative to the smooth baseline
+    within a swing (to avoid glitchy back-and-forth snaps).
+    """
+    t = np.asarray(t, float)
+    theta = unwrap_deg(theta)
+
+    t0, t1 = t[0], t[-1]
+    T = max(1e-9, t1 - t0)
+    u = (t - t0) / T
+
+    # Smooth baseline (the "true" motion we respect)
     base = moving_average(theta, smooth_win)
     resid = theta - base
-    if rng is None: rng = np.random.default_rng()
-    bins = np.linspace(0,1,K+1)
-    # jitter time then bin
-    u_j = np.clip(u + rng.normal(0.0, sigma_t/max(T,1e-9), size=u.shape), 0.0, 1.0-1e-9)
+
+    if rng is None:
+        rng = np.random.default_rng()
+
+    # Binning in normalized time
+    bins = np.linspace(0.0, 1.0, K + 1)
+
+    # Optional timing jitter (kept, but small values are recommended)
+    if sigma_t > 0 and T > 0:
+        u_j = np.clip(
+            u + rng.normal(0.0, sigma_t / T, size=u.shape),
+            0.0,
+            1.0 - 1e-9
+        )
+    else:
+        u_j = u
+
     idx = np.digitize(u_j, bins[1:-1], right=False)
-    step_vals = np.array([np.median(resid[idx==k]) if np.any(idx==k) else 0.0 for k in range(K)])
+
+    # Step values: median residual per bin
+    step_vals = np.array([
+        np.median(resid[idx == k]) if np.any(idx == k) else 0.0
+        for k in range(K)
+    ])
     resid_hat = step_vals[idx]
-    # Laplace noise with std ~ sigma_deg
-    if sigma_deg>0:
-        b = sigma_deg/np.sqrt(2.0); noise = rng.laplace(0.0, b, size=resid_hat.shape)
+
+    # Angle noise
+    if sigma_deg > 0:
+        b = sigma_deg / np.sqrt(2.0)
+        noise = rng.laplace(0.0, b, size=resid_hat.shape)
     else:
         noise = 0.0
+
     theta_chop = base + resid_hat + noise
-    return theta_chop
+
+    # --- Direction-consistency pass to remove "glitchy" backward snaps ---
+
+    # Gradient of baseline tells us main direction of motion
+    base_grad = np.gradient(base, t)
+
+    # Copy so we can adjust in-place
+    theta_smooth = theta_chop.copy()
+
+    # Thresholds
+    grad_tol = 1e-3   # treat smaller gradients as "turning point"
+    step_tol = 1.0    # deg; small opposite moves below this are allowed
+
+    for i in range(1, len(theta_smooth)):
+        dir_base = np.sign(base_grad[i])
+
+        # Near an extremum (grad ~ 0), allow direction changes
+        if abs(dir_base) < grad_tol:
+            continue
+
+        step = theta_smooth[i] - theta_smooth[i - 1]
+
+        # If step goes opposite the baseline direction and is big enough,
+        # replace it with a hold (no backward snap).
+        if step * dir_base < 0 and abs(step) > step_tol:
+            theta_smooth[i] = theta_smooth[i - 1]
+
+    return theta_smooth
 
 def finite_diff(y, t):
     """
