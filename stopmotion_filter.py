@@ -50,10 +50,13 @@ def fit_params(t, theta, min_K=3, max_K=24, smooth_win=5):
 
 def apply_filter(t, theta, K, sigma_t, sigma_deg, smooth_win=5, rng=None):
     """
-    Apply step-hold filter with small jitter/noise, then enforce that
-    motion stays mostly one-way within each swing segment, based on the
-    smooth baseline. This removes "glitchy" back-and-forth snaps while
-    keeping the chunky stop-motion feel.
+    Apply step-hold filter with jitter/noise, then:
+      - clip residuals to avoid huge outliers,
+      - enforce direction consistency within segments,
+      - clamp final deviation from the smooth baseline.
+
+    This keeps the stop-motion "chunkiness" but removes big
+    back-and-forth glitches and wild swings caused by bad detections.
     """
     t = np.asarray(t, float)
     theta = unwrap_deg(theta)
@@ -62,17 +65,27 @@ def apply_filter(t, theta, K, sigma_t, sigma_deg, smooth_win=5, rng=None):
     T = max(1e-9, t1 - t0)
     u = (t - t0) / T
 
-    # Smooth baseline (the "true" motion we respect)
+    # Smooth baseline: the motion we trust
     base = moving_average(theta, smooth_win)
     resid = theta - base
 
     if rng is None:
         rng = np.random.default_rng()
 
-    # Binning in normalized time
+    # ---- 1) Robust residual clipping ----
+    med = np.median(resid)
+    mad = np.median(np.abs(resid - med))  # median abs dev
+    if mad > 0:
+        # robust sigma estimate
+        sigma_resid = 1.4826 * mad
+        resid_max = max(10.0, 3.0 * sigma_resid)
+    else:
+        resid_max = 30.0  # fallback
+    resid_clipped = np.clip(resid, -resid_max, resid_max)
+
+    # ---- 2) Step-hold construction in normalized time ----
     bins = np.linspace(0.0, 1.0, K + 1)
 
-    # Optional timing jitter
     if sigma_t > 0 and T > 0:
         u_j = np.clip(
             u + rng.normal(0.0, sigma_t / T, size=u.shape),
@@ -84,37 +97,33 @@ def apply_filter(t, theta, K, sigma_t, sigma_deg, smooth_win=5, rng=None):
 
     idx = np.digitize(u_j, bins[1:-1], right=False)
 
-    # Step values: median residual per bin
     step_vals = np.array([
-        np.median(resid[idx == k]) if np.any(idx == k) else 0.0
+        np.median(resid_clipped[idx == k]) if np.any(idx == k) else 0.0
         for k in range(K)
     ])
     resid_hat = step_vals[idx]
 
-    # Angle noise
+    # Angle noise, also lightly clipped
     if sigma_deg > 0:
         b = sigma_deg / np.sqrt(2.0)
         noise = rng.laplace(0.0, b, size=resid_hat.shape)
+        noise_max = 3.0 * sigma_deg
+        noise = np.clip(noise, -noise_max, noise_max)
     else:
         noise = 0.0
 
     theta_chop = base + resid_hat + noise
 
-    # -------- Segment-based direction consistency filter --------
-
+    # ---- 3) Segment-based direction consistency ----
     theta_smooth = theta_chop.copy()
 
-    # Gradient of baseline: deg/s
     base_grad = np.gradient(base, t)
-
-    # Raw sign of gradient
     dir_raw = np.sign(base_grad)
 
-    # Treat small gradients as "flat" (no direction)
-    grad_tol = 1.0  # deg/s; tweak if needed
+    grad_tol = 1.0  # deg/s; treat smaller as "flat"
     dir_raw[np.abs(base_grad) < grad_tol] = 0
 
-    # Forward-fill direction across short flat regions
+    # forward-fill direction over short flat bits
     dir_seg = dir_raw.copy()
     last = 0
     for i in range(len(dir_seg)):
@@ -123,42 +132,43 @@ def apply_filter(t, theta, K, sigma_t, sigma_deg, smooth_win=5, rng=None):
         else:
             last = dir_seg[i]
 
-    # Now dir_seg is roughly +1 in forward swings, -1 in backward swings, 0 where undefined
-
     n = len(theta_smooth)
-    step_tol = 1.0  # deg; max allowed backward step within a segment
+    step_tol = 1.0  # max opposite-direction step allowed (deg)
 
     start = 0
     while start < n:
         d = dir_seg[start]
-        # extend segment while direction stays the same
         end = start + 1
         while end < n and dir_seg[end] == d:
             end += 1
 
         if d == 0 or end - start <= 1:
-            # no clear direction in this segment; skip
             start = end
             continue
 
-        # Enforce mostly monotone motion within [start, end)
         prev = theta_smooth[start]
         for i in range(start + 1, end):
             step = theta_smooth[i] - prev
             if d > 0:
-                # baseline says "increasing": forbid large decreases
+                # should be increasing; forbid big decreases
                 if step < -step_tol:
                     theta_smooth[i] = prev
                 else:
                     prev = theta_smooth[i]
             elif d < 0:
-                # baseline says "decreasing": forbid large increases
+                # should be decreasing; forbid big increases
                 if step > step_tol:
                     theta_smooth[i] = prev
                 else:
                     prev = theta_smooth[i]
-
         start = end
+
+    # ---- 4) Clamp final deviation from baseline ----
+    max_dev = 1.2 * resid_max  # allow a bit more than residual clip
+    for i in range(n):
+        delta = theta_smooth[i] - base[i]
+        if abs(delta) > max_dev:
+            theta_smooth[i] = base[i] + np.sign(delta) * max_dev
 
     return theta_smooth
 
